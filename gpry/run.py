@@ -586,7 +586,7 @@ class Runner():
         share_attr(self, "gpr")
         self.gpr.set_random_state(self.random_state)
 
-    def run(self):
+    def run(self,vect=False):
         r"""
         Runs the acquisition-training-convergence loop until either convergence or
         a stopping condition is reached.
@@ -598,7 +598,7 @@ class Runner():
             # Define initial training set
             if is_main_process:
                 self.banner("Drawing initial samples.")
-            self.do_initial_training()
+            self.do_initial_training(vect=vect)
             if is_main_process:
                 # Save checkpoint
                 self.save_checkpoint()
@@ -645,12 +645,15 @@ class Runner():
             new_y_this_process = np.empty(0)
             sync_processes()  # to sync the timer
             with Timer() as timer_truth:
-                for x in new_X_this_process:
-                    self.log(f"[{mpi_rank}] Evaluating true posterior at {x}", level=4)
-                    new_y_this_process = np.append(
-                        new_y_this_process, self.model.logpost(x))
-                    self.log(f"[{mpi_rank}] Got true log-posterior {new_y_this_process} "
-                             f"at {x}", level=4)
+                if vect:
+                    new_y_this_process = self.model.vectorized(new_X_this_process)
+                else:
+                    for x in new_X_this_process:
+                        self.log(f"[{mpi_rank}] Evaluating true posterior at {x}", level=4)
+                        new_y_this_process = np.append(
+                            new_y_this_process, self.model.logpost(x))
+                        self.log(f"[{mpi_rank}] Got true log-posterior {new_y_this_process} "
+                                f"at {x}", level=4)
             self.progress.add_truth(timer_truth.time, len(new_X))
             # Collect (if parallel) and append to the current model
             if multiple_processes:
@@ -775,7 +778,7 @@ class Runner():
                 self.diagnose()
         self.has_run = True
 
-    def do_initial_training(self):
+    def do_initial_training(self,vect=False):
         """
         Draws an initial sample for the `gpr` GP model until it has a training set of size
         `n_initial`, counting only finite-target points ("finite" here meaning over the
@@ -816,6 +819,9 @@ class Runner():
             return
         n_iterations_before_giving_up = int(
             np.ceil(self.max_initial / n_to_sample_per_process))
+        if vect:
+            n_iterations_before_giving_up=1
+            n_to_sample_per_process=self.max_initial
         # Initial samples loop. The initial samples are drawn from the prior
         # and according to the distribution of the prior.
         sync_processes()  # to sync the timer
@@ -827,10 +833,15 @@ class Runner():
                     # Draw point from prior and evaluate logposterior at that point
                     X = self.initial_proposer.get(random_state=self.random_state)
                     self.log(f"[{mpi_rank}] Evaluating true posterior at {X}", level=4)
+                    if vect==True:
+                        X_init_loop = np.append(X_init_loop, np.atleast_2d(X), axis=0)
+                        continue
                     y = self.model.logpost(X)
                     self.log(f"[{mpi_rank}] Got true log-posterior {y} at {X}", level=4)
                     X_init_loop = np.append(X_init_loop, np.atleast_2d(X), axis=0)
                     y_init_loop = np.append(y_init_loop, y)
+                if vect:
+                    y_init_loop=self.model.vectorized(X_init_loop)
                 # Gather points and decide whether to break.
                 if multiple_processes:
                     # GATHER keeps rank order (MPI standard): we can do X and y separately
